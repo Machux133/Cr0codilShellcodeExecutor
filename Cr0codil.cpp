@@ -66,9 +66,10 @@ int main()
                     CloseHandle(hExplorerexe);
                 }
                 hExplorerexe = hProcess;
-                continue;
             }
-            CloseHandle(hProcess);
+            else {
+                CloseHandle(hProcess);
+            }
         }
     }
 
@@ -105,6 +106,12 @@ int main()
             printf("Failed to create process. Error: %d\n", GetLastError());
             return 1;
         }
+        if (ResumeThread(pi.hThread) == (DWORD)-1) {
+            printf("ResumeThread failed. Error: %d\n", GetLastError());
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return 1;
+        }
 
         printf("Process created with PID: %d\n", pi.dwProcessId);
 
@@ -136,16 +143,6 @@ int main()
 
         WaitForSingleObject(hThread, INFINITE);
         CloseHandle(hThread);
-        if (ResumeThread(pi.hThread) == (DWORD)-1) {
-            printf("ResumeThread failed. Error: %d\n", GetLastError());
-            VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            if (hExplorerexe) {
-                CloseHandle(hExplorerexe);
-            }
-            return 1;
-        }
 
         VirtualFreeEx(pi.hProcess, exec, 0, MEM_RELEASE);
         CloseHandle(pi.hProcess);
